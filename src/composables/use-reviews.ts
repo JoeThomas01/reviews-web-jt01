@@ -1,73 +1,106 @@
-import { inject, ref, type Ref } from 'vue';
-import { REVIEWS_KEY, type Reviews } from '../config/appServices';
-import type { Review } from '../app/review-service';
-import type { AddReviewCommand } from '../app/add-review';
+// src/composables/use-reviews.ts
+import { ref } from 'vue';
 
-export type UseReviews = {
-  // state
-  readonly reviews: Ref<readonly Review[]>;
-  readonly totalCount: Ref<number>;
-  readonly loading: Ref<boolean>;
-  readonly adding: Ref<boolean>;
-  readonly error: Ref<string | null>;
-  // actions
-  fetchReviews: () => Promise<void>;
-  addReview: (command: AddReviewCommand) => Promise<void>;
+// Reservation-ish shape from your backend
+type Reservation = {
+  id: string;
+  deviceId: string;
+  userId: string;
+  status?: string;
+  startDate?: string;
+  endDate?: string;
+  notes?: string;
 };
 
-export function useReviews(): UseReviews {
-  const uses = inject<Reviews>(REVIEWS_KEY);
-  if (!uses) throw new Error('Reviews not provided');
+type ApiResponse<T> = {
+  success: boolean;
+  data: T;
+  error?: string;
+};
 
-  const reviews = ref<readonly Review[]>([]);
-  const totalCount = ref(0);
-  const loading = ref(false);
-  const adding = ref(false);
-  const error = ref<string | null>(null);
+// We keep the old name "useReviews" but this is really for reservations now.
+const reviews = ref<Reservation[]>([]);
+const totalCount = ref(0);
+const loading = ref(false);
+const adding = ref(false);
+const error = ref<string | null>(null);
 
-  const fetchReviews = async (): Promise<void> => {
-    if (loading.value) return;
-    loading.value = true;
-    error.value = null;
-    try {
-      const result = await uses.listReviews();
-      if (result.success) {
-        reviews.value = result.reviews;
-        totalCount.value = result.totalCount;
-      } else {
-        error.value = result.errors.join('; ');
-        reviews.value = [];
-        totalCount.value = 0;
-      }
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e);
-      reviews.value = [];
-      totalCount.value = 0;
-    } finally {
-      loading.value = false;
+// Base URL for your Reservations API, e.g.
+// https://reservations-test-jt01-func.azurewebsites.net/api
+const baseUrl = import.meta.env.VITE_REVIEWS_BASE_URL?.replace(/\/$/, '') ?? '';
+
+async function fetchReviews() {
+  if (!baseUrl) {
+    error.value = 'VITE_REVIEWS_BASE_URL is not configured';
+    return;
+  }
+
+  loading.value = true;
+  error.value = null;
+
+  try {
+    const response = await fetch(`${baseUrl}/reservations`, {
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
     }
-  };
 
-  const add = async (command: AddReviewCommand): Promise<void> => {
-    if (adding.value) return;
-    adding.value = true;
-    error.value = null;
-    try {
-      const result = await uses.addReview(command);
-      if (result.success) {
-        // Prepend the new review for a "newest first" UI; keep immutable array for safety
-        reviews.value = [result.review, ...reviews.value];
-        totalCount.value = Math.max(totalCount.value + 1, reviews.value.length);
-      } else {
-        error.value = result.errors.join('; ');
-      }
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e);
-    } finally {
-      adding.value = false;
+    const json = (await response.json()) as Partial<ApiResponse<Reservation[]>>;
+
+    const data = Array.isArray(json.data) ? json.data : [];
+    reviews.value = data;
+    totalCount.value = data.length;
+  } catch (e: any) {
+    console.error('Failed to fetch reservations:', e);
+    error.value = e?.message ?? String(e);
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function addReview(payload: any) {
+  if (!baseUrl) {
+    error.value = 'VITE_REVIEWS_BASE_URL is not configured';
+    return;
+  }
+
+  adding.value = true;
+  error.value = null;
+
+  try {
+    const response = await fetch(`${baseUrl}/reservations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
     }
-  };
 
+    const json = (await response.json()) as Partial<ApiResponse<Reservation>>;
+
+    const created = json.data;
+
+    if (created) {
+      // Put the new reservation at the top of the list
+      reviews.value = [created, ...reviews.value];
+      totalCount.value = reviews.value.length;
+    }
+  } catch (e: any) {
+    console.error('Failed to create reservation:', e);
+    error.value = e?.message ?? String(e);
+  } finally {
+    adding.value = false;
+  }
+}
+
+export function useReviews() {
   return {
     reviews,
     totalCount,
@@ -75,6 +108,6 @@ export function useReviews(): UseReviews {
     adding,
     error,
     fetchReviews,
-    addReview: add,
+    addReview,
   };
 }
