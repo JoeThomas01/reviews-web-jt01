@@ -1,3 +1,4 @@
+// src/router/index.ts
 import { createRouter, createWebHistory } from 'vue-router';
 import ListReviews from '@/views/ListReviews.vue';
 
@@ -6,7 +7,7 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      name: 'home',
+      name: 'reservations',
       component: ListReviews,
     },
   ],

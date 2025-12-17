@@ -19,6 +19,7 @@ function createReviewServiceFromEnv(): ReviewService {
   const kind = (env.VITE_REVIEWS_SERVICE || '').toLowerCase();
   const baseUrl = env.VITE_REVIEWS_BASE_URL;
   const useSeedData = env.VITE_USE_SEED_DATA === 'true';
+  console.log('[Reviews config]', { kind, baseUrl, useSeedData });
 
   if (kind === 'fake') {
     return new FakeReviewService(useSeedData ? seedReviews : []);

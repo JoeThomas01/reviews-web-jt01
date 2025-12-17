@@ -12,11 +12,13 @@ type CreateReservationPayload = {
   notes?: string;
 };
 
-// Device shape returned by DeviceLoans API
+// Device shape (loose, because your backend may have extra fields)
 type Device = {
   id: string;
-  deviceType: string;
-  status: 'available' | 'reserved' | 'loaned';
+  deviceType?: string;
+  type?: string;
+  name?: string;
+  status?: string; // available | reserved | loaned (or variants)
 };
 
 // --- Auth0 state ---
@@ -33,39 +35,24 @@ const successMessage = ref<string | null>(null);
 // Only allow creating when signed in and Auth0 has finished loading
 const canCreate = computed(() => isAuthenticated.value && !isLoading.value);
 
-// --- Devices state (from DeviceLoans) ---
+// --- Devices state ---
 const devices = ref<Device[]>([]);
 const devicesLoading = ref(false);
 const devicesError = ref<string | null>(null);
 
-// For now keep this hardcoded (we’ll env-var it later if you want)
-const DEVICELOANS_API =
-  'https://deviceloans-test-jt01b-func.azurewebsites.net/api';
+const deviceLoansBaseUrl =
+  import.meta.env.VITE_DEVICELOANS_BASE_URL?.replace(/\/$/, '') ?? '';
 
-const fetchDevices = async () => {
-  devicesLoading.value = true;
-  devicesError.value = null;
-
-  try {
-    const res = await fetch(`${DEVICELOANS_API}/devices`, {
-      headers: { Accept: 'application/json' },
-    });
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-
-    // Expect an array of devices
-    devices.value = Array.isArray(json) ? (json as Device[]) : [];
-  } catch (e: any) {
-    console.error('Failed to fetch devices:', e);
-    devicesError.value = e?.message ?? String(e);
-  } finally {
-    devicesLoading.value = false;
-  }
+const normaliseStatus = (status?: string) => {
+  const s = (status ?? '').toLowerCase();
+  if (s === 'available') return 'available';
+  if (s === 'reserved') return 'reserved';
+  if (s === 'loaned' || s === 'loanedout' || s === 'loaned_out') return 'loaned';
+  return 'unknown';
 };
 
-const availabilityLabel = (status: Device['status']) => {
-  switch (status) {
+const availabilityLabel = (status?: string) => {
+  switch (normaliseStatus(status)) {
     case 'available':
       return 'Available';
     case 'reserved':
@@ -74,6 +61,46 @@ const availabilityLabel = (status: Device['status']) => {
       return 'Loaned out';
     default:
       return 'Unknown';
+  }
+};
+
+const fetchDevices = async () => {
+  if (!deviceLoansBaseUrl) {
+    devicesError.value = 'VITE_DEVICELOANS_BASE_URL is not configured';
+    devices.value = [];
+    return;
+  }
+
+  devicesLoading.value = true;
+  devicesError.value = null;
+
+  try {
+    const res = await fetch(`${deviceLoansBaseUrl}/devices`, {
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!res.ok) {
+      throw new Error(`DeviceLoans HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+
+    // Support BOTH shapes:
+    // 1) { success: true, data: [...] }
+    // 2) [...]
+    const data = Array.isArray(json?.data)
+      ? json.data
+      : Array.isArray(json)
+        ? json
+        : [];
+
+    devices.value = data as Device[];
+  } catch (e: any) {
+    console.error('Failed to fetch devices:', e);
+    devicesError.value = e?.message ?? String(e);
+    devices.value = [];
+  } finally {
+    devicesLoading.value = false;
   }
 };
 
@@ -113,7 +140,6 @@ const handleSubmit = async (payload: CreateReservationPayload) => {
 const handleCancel = () => {
   showForm.value = false;
   successMessage.value = null;
-
   if (formRef.value) {
     formRef.value.resetForm();
   }
@@ -127,30 +153,6 @@ onMounted(() => {
 
 <template>
   <section class="page">
-    <!-- ========================= -->
-    <!-- Devices / Availability -->
-    <!-- ========================= -->
-    <section class="devices">
-      <h1>Devices</h1>
-
-      <div v-if="devicesLoading" class="state">Loading devices…</div>
-      <div v-else-if="devicesError" class="state state--error">
-        {{ devicesError }}
-      </div>
-
-      <ul v-else class="grid" role="list">
-        <li v-for="d in devices" :key="d.id" class="grid__item device-card">
-          <strong>{{ d.deviceType }}</strong>
-          <span class="badge" :class="`badge--${d.status}`">
-            {{ availabilityLabel(d.status) }}
-          </span>
-        </li>
-      </ul>
-    </section>
-
-    <!-- ========================= -->
-    <!-- Reservations -->
-    <!-- ========================= -->
     <header class="page__header">
       <h1>Reservations</h1>
 
@@ -164,6 +166,32 @@ onMounted(() => {
         {{ showForm ? 'Cancel' : '+ Add Reservation' }}
       </button>
     </header>
+
+    <!-- Devices Section -->
+    <section class="devices">
+      <h2>Devices</h2>
+
+      <div v-if="devicesLoading" class="state">Loading devices…</div>
+      <div v-else-if="devicesError" class="state state--error">
+        {{ devicesError }}
+      </div>
+      <div v-else-if="!devices.length" class="state">
+        No devices found in DeviceLoans yet.
+      </div>
+
+      <ul v-else class="grid" role="list">
+        <li v-for="d in devices" :key="d.id" class="grid__item device-card">
+          <div class="device-left">
+            <strong>{{ d.name ?? d.deviceType ?? d.type ?? d.id }}</strong>
+            <div class="device-id">ID: {{ d.id }}</div>
+          </div>
+
+          <span class="badge" :class="`badge--${normaliseStatus(d.status)}`">
+            {{ availabilityLabel(d.status) }}
+          </span>
+        </li>
+      </ul>
+    </section>
 
     <!-- Hint when logged out -->
     <p v-if="!isLoading && !isAuthenticated" class="hint">
@@ -192,7 +220,6 @@ onMounted(() => {
 
     <div v-if="loading" class="state">Loading…</div>
     <div v-else-if="error" class="state state--error">{{ error }}</div>
-
     <div v-else>
       <ul v-if="reviews.length" class="grid" role="list">
         <li v-for="r in reviews" :key="r.id" class="grid__item">
@@ -206,55 +233,21 @@ onMounted(() => {
 
 <style scoped>
 .page {
-  max-width: 900px;
+  max-width: 800px;
   margin: 2rem auto;
   padding: 0 1rem;
 }
 
-/* Devices section */
-.devices {
-  margin-bottom: 3rem;
-}
-
-.device-card {
-  padding: 1rem;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-/* Badges */
-.badge {
-  padding: 0.25rem 0.6rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.badge--available {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.badge--reserved {
-  background: #fef3c7;
-  color: #92400e;
-}
-
-.badge--loaned {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-/* Header section */
 .page__header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
   margin-bottom: 0.5rem;
+}
+
+.devices {
+  margin: 2rem 0;
 }
 
 .page__meta {
@@ -269,7 +262,6 @@ onMounted(() => {
   color: #6b7280;
 }
 
-/* Buttons */
 .btn {
   padding: 0.625rem 1.25rem;
   border: none;
@@ -294,7 +286,6 @@ onMounted(() => {
   background-color: #2563eb;
 }
 
-/* Success */
 .success-message {
   padding: 1rem;
   background-color: #d1fae5;
@@ -306,7 +297,6 @@ onMounted(() => {
   font-weight: 500;
 }
 
-/* Grid & state */
 .grid {
   list-style: none;
   padding: 0;
@@ -318,6 +308,54 @@ onMounted(() => {
 
 .grid__item {
   display: block;
+}
+
+.device-card {
+  padding: 1rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #fff;
+}
+
+.device-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.device-id {
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.badge {
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.badge--available {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.badge--reserved {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.badge--loaned {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.badge--unknown {
+  background: #e5e7eb;
+  color: #374151;
 }
 
 .state {

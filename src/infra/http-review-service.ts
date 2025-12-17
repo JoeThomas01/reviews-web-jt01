@@ -1,3 +1,5 @@
+// src/infra/http-review-service.ts
+
 import type {
   Review,
   ReviewService,
@@ -6,6 +8,27 @@ import type {
   ListReviewsOutput,
 } from '../app/review-service';
 
+// --- DTO from your Reservations API ---
+// It returns: { success: true, data: [ { ...ReservationDto } ] }
+
+type ReservationDto = {
+  id: string;
+  deviceId: string;
+  userId: string;
+  startDate: string; // ISO
+  endDate?: string; // ISO
+  status: string;
+  notes?: string;
+};
+
+type ListReservationsEnvelope = {
+  success?: boolean;
+  data?: ReservationDto[];
+  errors?: string[];
+  error?: string;
+};
+
+// Old review API shapes (for addReview)
 type ReviewDto = {
   id: string;
   rating: number;
@@ -19,6 +42,10 @@ type ListReviewsResponseDto =
   | ReviewDto[];
 
 type AddReviewResponseDto = { review?: ReviewDto; errors?: string[] };
+
+// --------------------------------------------------
+// HTTP client + options
+// --------------------------------------------------
 
 export type HttpClient = typeof fetch;
 
@@ -37,46 +64,63 @@ export class HttpReviewService implements ReviewService {
     this.baseUrl = options.baseUrl
       ? options.baseUrl.replace(/\/$/, '')
       : undefined;
-    // Ensure fetch is properly bound to a global target to avoid illegal invocation errors
+
+    // Bind fetch correctly so we don't get "illegal invocation"
     const rawHttp: HttpClient | undefined =
       options.http ?? (typeof fetch !== 'undefined' ? fetch : undefined);
+
     if (!rawHttp) {
       throw new Error('No fetch implementation available');
     }
+
     const target: any = typeof window !== 'undefined' ? window : globalThis;
     this.http = (rawHttp as any).bind(target);
     this.headers = { ...(options.headers ?? {}) };
   }
 
+  // --------------------------------------------------
+  // LIST: now talks to /reservations and understands { success, data }
+  // --------------------------------------------------
   async listReviews(): Promise<ListReviewsOutput> {
-    const res = await this.http(this.url('/reviews'), {
+    const res = await this.http(this.url('/reservations'), {
       method: 'GET',
       headers: this.mergeHeaders({ Accept: 'application/json' }),
     });
+
     await this.ensureOk(res);
-    const body = (await this.parseJson(res)) as ListReviewsResponseDto;
 
-    const errors = Array.isArray(body)
-      ? undefined
-      : Array.isArray(body.errors)
-        ? body.errors
-        : undefined;
-    if (errors && errors.length) throw new Error(errors.join('; '));
+    const body = (await this.parseJson(res)) as
+      | ListReservationsEnvelope
+      | ReservationDto[];
 
-    const reviews = Array.isArray(body)
-      ? body
-      : Array.isArray(body.reviews)
-        ? body.reviews
-        : [];
-    const mapped = reviews.map(toDomainReview);
-    const totalCount = Array.isArray(body)
-      ? mapped.length
-      : typeof body.totalCount === 'number'
-        ? body.totalCount
-        : mapped.length;
-    return { reviews: mapped, totalCount };
+    let reservations: ReservationDto[] = [];
+    let errors: string[] | undefined;
+
+    if (Array.isArray(body)) {
+      // Unwrapped array
+      reservations = body;
+    } else {
+      if (Array.isArray(body.errors)) errors = body.errors;
+      if (Array.isArray(body.data)) reservations = body.data;
+      if (!reservations.length && body.error && !errors) {
+        errors = [body.error];
+      }
+    }
+
+    if (errors && errors.length) {
+      throw new Error(errors.join('; '));
+    }
+
+    const reviews = reservations.map(toDomainReviewFromReservation);
+    const totalCount = reviews.length;
+
+    return { reviews, totalCount };
   }
 
+  // --------------------------------------------------
+  // ADD: still wired to the original /reviews API shape
+  // (this is fine for now; your “Add Reservation” form is temporary anyway)
+  // --------------------------------------------------
   async addReview(input: AddReviewInput): Promise<AddReviewOutput> {
     const dto = toAddReviewRequestDto(input);
     const res = await this.http(this.url('/reviews'), {
@@ -100,7 +144,10 @@ export class HttpReviewService implements ReviewService {
     return { review };
   }
 
-  // helpers
+  // --------------------------------------------------
+  // Helpers
+  // --------------------------------------------------
+
   private url(path: string): string {
     if (!this.baseUrl) return path;
     return `${this.baseUrl}${path}`;
@@ -142,7 +189,37 @@ export class HttpReviewService implements ReviewService {
   }
 }
 
-// Infra-level request DTO (decoupled from app AddReviewInput)
+// --------------------------------------------------
+// Mapping from ReservationDto -> Review domain type
+// (so the existing UI can display it)
+// --------------------------------------------------
+
+function toDomainReviewFromReservation(r: ReservationDto): Review {
+  const start = toDate(r.startDate);
+  const end = r.endDate ? toDate(r.endDate) : null;
+
+  const title = `Reservation for ${r.deviceId}`;
+  const commentParts: string[] = [
+    `User: ${r.userId}`,
+    `Status: ${r.status}`,
+    `Start: ${start.toLocaleString()}`,
+  ];
+  if (end) commentParts.push(`End: ${end.toLocaleString()}`);
+  if (r.notes) commentParts.push(`Notes: ${r.notes}`);
+
+  return {
+    id: r.id,
+    rating: 0, // we don't have a rating in Reservation; just use 0
+    title,
+    comment: commentParts.join(' | '),
+    createdAt: start,
+  };
+}
+
+// --------------------------------------------------
+// Old review DTO mapping (for addReview only)
+// --------------------------------------------------
+
 type AddReviewRequestDto = {
   rating: number;
   title: string;
@@ -170,7 +247,7 @@ function toDomainReview(r: ReviewDto): Review {
 function toDate(v: string): Date {
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) {
-    throw new Error('Invalid createdAt date');
+    throw new Error('Invalid date');
   }
   return d;
 }

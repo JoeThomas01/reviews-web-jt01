@@ -1,9 +1,16 @@
+<!-- src/components/AddReviewForm.vue -->
 <script setup lang="ts">
 import { reactive, ref, computed } from 'vue';
-import type { AddReviewCommand } from '../app/add-review';
+
+export type CreateReservationPayload = {
+  deviceId: string;
+  userId: string;
+  startDate?: string;
+  notes?: string;
+};
 
 const emit = defineEmits<{
-  submit: [command: AddReviewCommand];
+  submit: [payload: CreateReservationPayload];
   cancel: [];
 }>();
 
@@ -13,41 +20,40 @@ const props = defineProps<{
 }>();
 
 const form = reactive({
-  rating: 5,
-  title: '',
-  comment: '',
+  deviceId: '',
+  userId: '',
+  startDate: '',
+  notes: '',
 });
 
 const validationErrors = ref<Record<string, string>>({});
 const touched = reactive({
-  rating: false,
-  title: false,
-  comment: false,
+  deviceId: false,
+  userId: false,
+  startDate: false,
+  notes: false,
 });
 
 const validate = (): boolean => {
   const errors: Record<string, string> = {};
 
-  if (form.rating < 1 || form.rating > 5) {
-    errors.rating = 'Rating must be between 1 and 5';
+  if (!form.deviceId.trim()) {
+    errors.deviceId = 'Device ID is required';
   }
 
-  const title = form.title.trim();
-  if (!title) {
-    errors.title = 'Title is required';
-  } else if (title.length < 3) {
-    errors.title = 'Title must be at least 3 characters';
-  } else if (title.length > 100) {
-    errors.title = 'Title must be no more than 100 characters';
+  if (!form.userId.trim()) {
+    errors.userId = 'User ID is required';
   }
 
-  const comment = form.comment.trim();
-  if (!comment) {
-    errors.comment = 'Comment is required';
-  } else if (comment.length < 10) {
-    errors.comment = 'Comment must be at least 10 characters';
-  } else if (comment.length > 500) {
-    errors.comment = 'Comment must be no more than 500 characters';
+  if (form.startDate) {
+    const d = new Date(form.startDate);
+    if (Number.isNaN(d.getTime())) {
+      errors.startDate = 'Start date must be a valid date/time';
+    }
+  }
+
+  if (form.notes && form.notes.trim().length > 500) {
+    errors.notes = 'Notes must be 500 characters or fewer';
   }
 
   validationErrors.value = errors;
@@ -55,27 +61,28 @@ const validate = (): boolean => {
 };
 
 const isValid = computed(() => {
-  return (
-    form.rating >= 1 &&
-    form.rating <= 5 &&
-    form.title.trim().length >= 3 &&
-    form.title.trim().length <= 100 &&
-    form.comment.trim().length >= 10 &&
-    form.comment.trim().length <= 500
-  );
+  if (!form.deviceId.trim() || !form.userId.trim()) return false;
+  if (form.startDate) {
+    const d = new Date(form.startDate);
+    if (Number.isNaN(d.getTime())) return false;
+  }
+  if (validationErrors.value.notes) return false;
+  return true;
 });
 
 const handleSubmit = () => {
-  touched.rating = true;
-  touched.title = true;
-  touched.comment = true;
+  touched.deviceId = true;
+  touched.userId = true;
+  touched.startDate = true;
+  touched.notes = true;
 
   if (!validate()) return;
 
   emit('submit', {
-    rating: form.rating,
-    title: form.title.trim(),
-    comment: form.comment.trim(),
+    deviceId: form.deviceId.trim(),
+    userId: form.userId.trim(),
+    startDate: form.startDate || undefined,
+    notes: form.notes.trim() || undefined,
   });
 };
 
@@ -84,13 +91,15 @@ const handleCancel = () => {
 };
 
 const resetForm = () => {
-  form.rating = 5;
-  form.title = '';
-  form.comment = '';
+  form.deviceId = '';
+  form.userId = '';
+  form.startDate = '';
+  form.notes = '';
   validationErrors.value = {};
-  touched.rating = false;
-  touched.title = false;
-  touched.comment = false;
+  touched.deviceId = false;
+  touched.userId = false;
+  touched.startDate = false;
+  touched.notes = false;
 };
 
 const markTouched = (field: keyof typeof touched) => {
@@ -102,71 +111,78 @@ defineExpose({ resetForm });
 </script>
 
 <template>
-  <div class="add-review-form">
-    <h2>Add Your Review</h2>
+  <div class="add-reservation-form">
+    <h2>Create a Reservation</h2>
 
     <form @submit.prevent="handleSubmit">
-      <!-- Rating -->
+      <!-- Device ID -->
       <div class="form-group">
-        <label for="rating">Rating</label>
-        <div class="rating-input">
-          <div class="stars">
-            <label
-              v-for="star in 5"
-              :key="star"
-              class="star-label"
-              :class="{ active: star <= form.rating }"
-            >
-              <input
-                type="radio"
-                name="rating"
-                :value="star"
-                v-model.number="form.rating"
-                @change="markTouched('rating')"
-              />
-              <span class="star">★</span>
-            </label>
-          </div>
-          <span class="rating-value">{{ form.rating }} / 5</span>
-        </div>
-        <span v-if="touched.rating && validationErrors.rating" class="error">
-          {{ validationErrors.rating }}
-        </span>
-      </div>
-
-      <!-- Title -->
-      <div class="form-group">
-        <label for="title">Title</label>
+        <label for="deviceId">Device ID</label>
         <input
-          id="title"
+          id="deviceId"
           type="text"
-          v-model="form.title"
-          @blur="markTouched('title')"
-          placeholder="Brief summary of your review"
-          maxlength="100"
+          v-model="form.deviceId"
+          @blur="markTouched('deviceId')"
+          placeholder="e.g. loan-device-001"
           :disabled="isSubmitting"
         />
-        <span class="char-count">{{ form.title.length }} / 100</span>
-        <span v-if="touched.title && validationErrors.title" class="error">
-          {{ validationErrors.title }}
+        <span
+          v-if="touched.deviceId && validationErrors.deviceId"
+          class="error"
+        >
+          {{ validationErrors.deviceId }}
         </span>
       </div>
 
-      <!-- Comment -->
+      <!-- User ID -->
       <div class="form-group">
-        <label for="comment">Comment</label>
+        <label for="userId">User ID</label>
+        <input
+          id="userId"
+          type="text"
+          v-model="form.userId"
+          @blur="markTouched('userId')"
+          placeholder="e.g. student-001"
+          :disabled="isSubmitting"
+        />
+        <span v-if="touched.userId && validationErrors.userId" class="error">
+          {{ validationErrors.userId }}
+        </span>
+      </div>
+
+      <!-- Start Date/Time -->
+      <div class="form-group">
+        <label for="startDate">Start date (optional)</label>
+        <input
+          id="startDate"
+          type="datetime-local"
+          v-model="form.startDate"
+          @blur="markTouched('startDate')"
+          :disabled="isSubmitting"
+        />
+        <span
+          v-if="touched.startDate && validationErrors.startDate"
+          class="error"
+        >
+          {{ validationErrors.startDate }}
+        </span>
+      </div>
+
+      <!-- Notes -->
+      <div class="form-group">
+        <label for="notes">Notes (optional)</label>
         <textarea
-          id="comment"
-          v-model="form.comment"
-          @blur="markTouched('comment')"
-          placeholder="Share your detailed experience..."
-          rows="5"
+          id="notes"
+          v-model="form.notes"
+          @blur="markTouched('notes')"
+          placeholder="Anything the loans desk should know…"
+          rows="4"
           maxlength="500"
           :disabled="isSubmitting"
         ></textarea>
-        <span class="char-count">{{ form.comment.length }} / 500</span>
-        <span v-if="touched.comment && validationErrors.comment" class="error">
-          {{ validationErrors.comment }}
+        <span class="char-count">{{ form.notes.length }} / 500</span>
+        <span v-if="touched.notes && validationErrors.notes" class="error">
+          {{ validationErrors.notes }}
         </span>
       </div>
 
@@ -190,7 +206,7 @@ defineExpose({ resetForm });
           class="btn btn-primary"
           :disabled="!isValid || isSubmitting"
         >
-          {{ isSubmitting ? 'Submitting...' : 'Submit Review' }}
+          {{ isSubmitting ? 'Creating…' : 'Create Reservation' }}
         </button>
       </div>
     </form>
@@ -198,7 +214,7 @@ defineExpose({ resetForm });
 </template>
 
 <style scoped>
-.add-review-form {
+.add-reservation-form {
   background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -207,7 +223,7 @@ defineExpose({ resetForm });
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-.add-review-form h2 {
+.add-reservation-form h2 {
   margin: 0 0 1.5rem;
   font-size: 1.5rem;
   color: #111827;
@@ -227,49 +243,8 @@ defineExpose({ resetForm });
   letter-spacing: 0.05em;
 }
 
-.rating-input {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-}
-
-.stars {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.star-label {
-  cursor: pointer;
-  transition: transform 0.1s;
-}
-
-.star-label:hover {
-  transform: scale(1.1);
-}
-
-.star-label input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.star {
-  font-size: 2rem;
-  color: #d1d5db;
-  transition: color 0.2s;
-}
-
-.star-label.active .star {
-  color: #fbbf24;
-}
-
-.rating-value {
-  font-size: 0.875rem;
-  color: #6b7280;
-  font-weight: 500;
-}
-
 input[type='text'],
+input[type='datetime-local'],
 textarea {
   width: 100%;
   padding: 0.75rem;
@@ -281,6 +256,7 @@ textarea {
 }
 
 input[type='text']:focus,
+input[type='datetime-local']:focus,
 textarea:focus {
   outline: none;
   border-color: #3b82f6;
@@ -288,6 +264,7 @@ textarea:focus {
 }
 
 input[type='text']:disabled,
+input[type='datetime-local']:disabled,
 textarea:disabled {
   background-color: #f9fafb;
   cursor: not-allowed;
@@ -364,7 +341,7 @@ textarea {
 }
 
 @media (max-width: 640px) {
-  .add-review-form {
+  .add-reservation-form {
     padding: 1rem;
   }
 
