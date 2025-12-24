@@ -1,0 +1,46 @@
+name: CI Build (reviews-web-jt01)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # Provide minimal env so Vite/Vue build never fails due to missing env vars
+    env:
+      VITE_REVIEWS_BASE_URL: /api
+      VITE_DEVICELOANS_BASE_URL: /api
+
+      VITE_AUTH0_DOMAIN: example.invalid
+      VITE_AUTH0_CLIENT_ID: dummy
+      VITE_AUTH0_AUDIENCE: https://deviceloans.jt01
+
+      VITE_APPINSIGHTS_IKEY: 00000000-0000-0000-0000-000000000000
+      VITE_APPINSIGHTS_INGESTION: https://uksouth-1.in.applicationinsights.azure.com
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Build
+        run: npm run build
