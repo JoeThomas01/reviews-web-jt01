@@ -1,0 +1,60 @@
+name: Build and Deploy (reviews-web-jt01) to Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    # These are baked into the SPA at build time
+    env:
+      VITE_REVIEWS_BASE_URL: https://reservations-test-jt01-func.azurewebsites.net/api
+      VITE_DEVICELOANS_BASE_URL: https://deviceloans-test-jt01b-func.azurewebsites.net/api
+
+      VITE_AUTH0_DOMAIN: week7-lab-jt01-tenant.uk.auth0.com
+      VITE_AUTH0_CLIENT_ID: BTG2nNsufsnlguFcKBzKbh2RMR9U0sH3
+      VITE_AUTH0_AUDIENCE: https://deviceloans.jt01
+
+      # Keep these aligned with what you verified locally (ikey + ingestion)
+      VITE_APPINSIGHTS_IKEY: 531744f1-0266-4d6c-8942-d2ea87b65de1
+      VITE_APPINSIGHTS_INGESTION: https://uksouth-1.in.applicationinsights.azure.com
+
+      # Optional but useful for filtering in Log Analytics
+      VITE_APPINSIGHTS_ROLE_NAME: reviews-web-jt01
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Azure Storage Static Website
+        uses: azure/CLI@v2
+        with:
+          inlineScript: |
+            az storage blob upload-batch \
+              --connection-string "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+              --destination '$web' \
+              --source dist \
+              --overwrite true
