@@ -1,41 +1,109 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue';
+import { onMounted, ref, computed, watch } from 'vue';
 import { useAuth0 } from '@auth0/auth0-vue';
-import { useReviews } from '@/composables/use-reviews';
-import ReviewCard from '@/components/ReviewCard.vue';
 import AddReviewForm from '@/components/AddReviewForm.vue';
+import { useReviews, type Reservation } from '@/composables/use-reviews';
 
-// Payload that the AddReviewForm emits for a new reservation
-type CreateReservationPayload = {
-  deviceId: string;
-  userId: string;
-  notes?: string;
-};
-
-// Device shape (loose, because your backend may have extra fields)
 type Device = {
   id: string;
+  label?: string;
   deviceType?: string;
-  type?: string;
-  name?: string;
-  status?: string; // available | reserved | loaned (or variants)
+  status?: string;
 };
 
-// --- Auth0 state ---
-const { isAuthenticated, isLoading } = useAuth0();
+const {
+  isAuthenticated,
+  isLoading,
+  loginWithRedirect,
+  getAccessTokenSilently,
+} = useAuth0();
 
-// --- Reservations state (still called "reviews" in the composable) ---
-const { reviews, totalCount, loading, adding, error, fetchReviews, addReview } =
-  useReviews();
+const {
+  reviews: reservations,
+  totalCount,
+  loading,
+  adding,
+  error,
+  fetchReviews,
+  addReview,
+  collectReservation,
+  returnReservation,
+} = useReviews();
 
 const showForm = ref(false);
 const formRef = ref<InstanceType<typeof AddReviewForm> | null>(null);
 const successMessage = ref<string | null>(null);
+const actionBusyId = ref<string | null>(null);
 
-// Only allow creating when signed in and Auth0 has finished loading
 const canCreate = computed(() => isAuthenticated.value && !isLoading.value);
 
-// --- Devices state ---
+// ---------------------------
+// Staff capability: decode permissions[] from access token
+// ---------------------------
+const staffLoading = ref(false);
+const permissions = ref<string[]>([]);
+const audience = import.meta.env.VITE_AUTH0_AUDIENCE;
+
+function decodeJwtPayload(token: string): any | null {
+  const parts = token.split('.');
+  const base64Url = parts.length >= 2 ? parts[1] : undefined;
+  if (!base64Url) return null;
+
+  // base64url -> base64
+  const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+
+  // Decode safely (handles UTF-8)
+  const json = decodeURIComponent(
+    Array.prototype.map
+      .call(atob(base64), (c: string) => {
+        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+      })
+      .join(''),
+  );
+
+  return JSON.parse(json);
+}
+
+async function refreshPermissions() {
+  permissions.value = [];
+
+  if (!isAuthenticated.value) return;
+
+  staffLoading.value = true;
+  try {
+    // Get a token for the same API audience your app uses
+    const token = await getAccessTokenSilently({
+      authorizationParams: {
+        ...(audience ? { audience } : {}),
+      },
+    });
+
+    const payload = decodeJwtPayload(token);
+    const perms = Array.isArray(payload?.permissions)
+      ? payload.permissions
+      : [];
+    permissions.value = perms;
+  } catch (e) {
+    console.warn('Failed to read permissions from token:', e);
+    permissions.value = [];
+  } finally {
+    staffLoading.value = false;
+  }
+}
+
+const canManageLoans = computed(() =>
+  permissions.value.includes('manage:loans'),
+);
+
+watch(
+  () => isAuthenticated.value,
+  async () => {
+    await refreshPermissions();
+  },
+  { immediate: true },
+);
+
+// ---- Devices ----
 const devices = ref<Device[]>([]);
 const devicesLoading = ref(false);
 const devicesError = ref<string | null>(null);
@@ -43,26 +111,70 @@ const devicesError = ref<string | null>(null);
 const deviceLoansBaseUrl =
   import.meta.env.VITE_DEVICELOANS_BASE_URL?.replace(/\/$/, '') ?? '';
 
-const normaliseStatus = (status?: string) => {
-  const s = (status ?? '').toLowerCase();
+function normaliseStatus(status?: string) {
+  const s = (status ?? '').trim().toLowerCase();
   if (s === 'available') return 'available';
   if (s === 'reserved') return 'reserved';
-  if (s === 'loaned' || s === 'loanedout' || s === 'loaned_out') return 'loaned';
+  if (s === 'loaned' || s === 'loanedout' || s === 'loaned_out')
+    return 'loaned';
   return 'unknown';
-};
+}
 
-const availabilityLabel = (status?: string) => {
-  switch (normaliseStatus(status)) {
-    case 'available':
-      return 'Available';
-    case 'reserved':
-      return 'Reserved';
-    case 'loaned':
-      return 'Loaned out';
-    default:
-      return 'Unknown';
+function availabilityLabel(norm: string) {
+  if (norm === 'available') return 'Available';
+  if (norm === 'reserved') return 'Reserved';
+  if (norm === 'loaned') return 'Loaned out';
+  return 'Unknown';
+}
+
+function isActiveReservation(r: Reservation): boolean {
+  try {
+    const now = Date.now();
+    const start = r.startDate ? new Date(r.startDate).getTime() : now;
+    const end = r.endDate ? new Date(r.endDate).getTime() : now;
+    if (Number.isNaN(start) || Number.isNaN(end)) return true;
+    return now >= start && now <= end;
+  } catch {
+    return true;
   }
-};
+}
+
+function effectiveDeviceStatus(
+  d: Device,
+): 'available' | 'reserved' | 'loaned' | 'unknown' {
+  const base = normaliseStatus(d.status);
+
+  if (base === 'loaned') return 'loaned';
+
+  const active = reservations.value.find(
+    (r) => r.deviceId === d.id && isActiveReservation(r),
+  );
+
+  if (active) {
+    const st = (active.status ?? '').toLowerCase();
+    if (st === 'reserved') return 'reserved';
+    if (st === 'collected') return 'loaned';
+  }
+
+  if (base === 'reserved') return 'reserved';
+  if (base === 'available') return 'available';
+  return 'unknown';
+}
+
+const deviceCounts = computed(() => {
+  const counts = {
+    total: devices.value.length,
+    available: 0,
+    reserved: 0,
+    loaned: 0,
+    unknown: 0,
+  };
+  for (const d of devices.value) {
+    const s = effectiveDeviceStatus(d);
+    counts[s] += 1;
+  }
+  return counts;
+});
 
 const fetchDevices = async () => {
   if (!deviceLoansBaseUrl) {
@@ -79,15 +191,11 @@ const fetchDevices = async () => {
       headers: { Accept: 'application/json' },
     });
 
-    if (!res.ok) {
-      throw new Error(`DeviceLoans HTTP ${res.status}`);
-    }
+    if (!res.ok)
+      throw new Error(`DeviceLoans HTTP ${res.status} ${res.statusText}`);
 
     const json = await res.json();
 
-    // Support BOTH shapes:
-    // 1) { success: true, data: [...] }
-    // 2) [...]
     const data = Array.isArray(json?.data)
       ? json.data
       : Array.isArray(json)
@@ -104,9 +212,9 @@ const fetchDevices = async () => {
   }
 };
 
+// ---- Form handlers ----
 const handleToggleForm = () => {
   if (!canCreate.value) return;
-
   showForm.value = !showForm.value;
   successMessage.value = null;
 
@@ -115,39 +223,69 @@ const handleToggleForm = () => {
   }
 };
 
-const handleSubmit = async (payload: CreateReservationPayload) => {
+const handleSubmit = async (payload: {
+  deviceId: string;
+  userId: string;
+  notes?: string;
+  startDate?: string;
+  endDate?: string;
+}) => {
   if (!canCreate.value) return;
 
   successMessage.value = null;
-
-  // Shape matches what the backend expects: deviceId, userId, notes
-  await addReview(payload as any);
+  await addReview(payload);
 
   if (!error.value) {
     successMessage.value = 'Reservation created successfully!';
     showForm.value = false;
+    formRef.value?.resetForm();
 
-    if (formRef.value) {
-      formRef.value.resetForm();
-    }
+    await Promise.all([fetchReviews(), fetchDevices()]);
 
-    setTimeout(() => {
-      successMessage.value = null;
-    }, 3000);
+    setTimeout(() => (successMessage.value = null), 3000);
   }
 };
 
 const handleCancel = () => {
   showForm.value = false;
   successMessage.value = null;
-  if (formRef.value) {
-    formRef.value.resetForm();
-  }
+  formRef.value?.resetForm();
 };
 
-onMounted(() => {
-  fetchDevices();
-  fetchReviews();
+async function handleCollect(r: Reservation) {
+  if (!r?.id) return;
+  if (!canManageLoans.value) return;
+
+  actionBusyId.value = r.id;
+  try {
+    await collectReservation(r.id);
+    await Promise.all([fetchReviews(), fetchDevices()]);
+  } finally {
+    actionBusyId.value = null;
+  }
+}
+
+async function handleReturn(r: Reservation) {
+  if (!r?.id) return;
+  if (!canManageLoans.value) return;
+
+  actionBusyId.value = r.id;
+  try {
+    await returnReservation(r.id);
+    await Promise.all([fetchReviews(), fetchDevices()]);
+  } finally {
+    actionBusyId.value = null;
+  }
+}
+
+function fmt(iso?: string) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+onMounted(async () => {
+  await Promise.all([fetchDevices(), fetchReviews()]);
 });
 </script>
 
@@ -156,20 +294,33 @@ onMounted(() => {
     <header class="page__header">
       <h1>Reservations</h1>
 
-      <!-- Show "+ Add Reservation" only when user is signed in -->
-      <button
-        v-if="canCreate"
-        @click="handleToggleForm"
-        class="btn btn--add"
-        :disabled="loading"
-      >
-        {{ showForm ? 'Cancel' : '+ Add Reservation' }}
-      </button>
+      <div class="actions">
+        <button
+          v-if="canCreate"
+          @click="handleToggleForm"
+          class="btn btn--add"
+          :disabled="loading"
+        >
+          {{ showForm ? 'Cancel' : '+ Add Reservation' }}
+        </button>
+
+        <button v-else class="btn btn--secondary" @click="loginWithRedirect()">
+          Sign in to reserve
+        </button>
+      </div>
     </header>
 
-    <!-- Devices Section -->
+    <!-- Devices -->
     <section class="devices">
-      <h2>Devices</h2>
+      <div class="devices__header">
+        <h2>Devices</h2>
+        <div class="devices__meta" v-if="devices.length">
+          <span>{{ deviceCounts.total }} total</span>
+          <span>• {{ deviceCounts.available }} available</span>
+          <span>• {{ deviceCounts.reserved }} reserved</span>
+          <span>• {{ deviceCounts.loaned }} loaned</span>
+        </div>
+      </div>
 
       <div v-if="devicesLoading" class="state">Loading devices…</div>
       <div v-else-if="devicesError" class="state state--error">
@@ -182,33 +333,36 @@ onMounted(() => {
       <ul v-else class="grid" role="list">
         <li v-for="d in devices" :key="d.id" class="grid__item device-card">
           <div class="device-left">
-            <strong>{{ d.name ?? d.deviceType ?? d.type ?? d.id }}</strong>
+            <strong>{{ d.label ?? d.id }}</strong>
+            <div class="device-sub">{{ d.deviceType ?? 'Unknown type' }}</div>
             <div class="device-id">ID: {{ d.id }}</div>
           </div>
 
-          <span class="badge" :class="`badge--${normaliseStatus(d.status)}`">
-            {{ availabilityLabel(d.status) }}
+          <span class="badge" :class="`badge--${effectiveDeviceStatus(d)}`">
+            {{ availabilityLabel(effectiveDeviceStatus(d)) }}
           </span>
         </li>
       </ul>
     </section>
 
-    <!-- Hint when logged out -->
-    <p v-if="!isLoading && !isAuthenticated" class="hint">
-      Sign in to create a reservation.
-    </p>
-
+    <!-- Meta -->
     <div v-if="!loading" class="page__meta" aria-live="polite">
-      <span v-if="totalCount > 0">{{ totalCount }} total</span>
-      <span v-else>None yet</span>
+      <span v-if="totalCount > 0">{{ totalCount }} total reservations</span>
+      <span v-else>No reservations yet</span>
+
+      <span v-if="isAuthenticated" style="margin-left: 10px; color: #6b7280">
+        • Staff actions:
+        <strong v-if="staffLoading">checking…</strong>
+        <strong v-else>{{ canManageLoans ? 'enabled' : 'hidden' }}</strong>
+      </span>
     </div>
 
-    <!-- Success Message -->
+    <!-- Success -->
     <div v-if="successMessage" class="success-message">
       {{ successMessage }}
     </div>
 
-    <!-- Add Reservation Form (only when signed in and toggled on) -->
+    <!-- Add Reservation -->
     <AddReviewForm
       v-if="showForm && canCreate"
       ref="formRef"
@@ -218,22 +372,84 @@ onMounted(() => {
       @cancel="handleCancel"
     />
 
-    <div v-if="loading" class="state">Loading…</div>
+    <!-- Reservations List -->
+    <div v-if="loading" class="state">Loading reservations…</div>
     <div v-else-if="error" class="state state--error">{{ error }}</div>
+
     <div v-else>
-      <ul v-if="reviews.length" class="grid" role="list">
-        <li v-for="r in reviews" :key="r.id" class="grid__item">
-          <ReviewCard :review="r" />
-        </li>
-      </ul>
-      <p v-else class="state">No reservations yet. Be the first!</p>
+      <div v-if="reservations.length" class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Device</th>
+              <th>User</th>
+              <th>Status</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Notes</th>
+              <th v-if="canManageLoans">Actions (staff)</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            <tr v-for="r in reservations" :key="r.id">
+              <td>
+                <div class="cell-strong">{{ r.deviceId }}</div>
+                <div class="cell-sub">ID: {{ r.id }}</div>
+              </td>
+              <td>{{ r.userId }}</td>
+              <td>
+                <span class="pill">{{
+                  (r.status ?? 'unknown').toLowerCase()
+                }}</span>
+              </td>
+              <td>{{ fmt(r.startDate) }}</td>
+              <td>{{ fmt(r.endDate) }}</td>
+              <td class="notes">{{ r.notes ?? '-' }}</td>
+
+              <td v-if="canManageLoans">
+                <div class="actions-col">
+                  <button
+                    class="btn-small"
+                    :disabled="actionBusyId === r.id"
+                    v-if="(r.status ?? '').toLowerCase() === 'reserved'"
+                    @click="handleCollect(r)"
+                  >
+                    Collect
+                  </button>
+
+                  <button
+                    class="btn-small"
+                    :disabled="actionBusyId === r.id"
+                    v-if="(r.status ?? '').toLowerCase() === 'collected'"
+                    @click="handleReturn(r)"
+                  >
+                    Return
+                  </button>
+
+                  <span
+                    v-if="
+                      (r.status ?? '').toLowerCase() !== 'reserved' &&
+                      (r.status ?? '').toLowerCase() !== 'collected'
+                    "
+                  >
+                    -
+                  </span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p v-else class="state">No reservations yet.</p>
     </div>
   </section>
 </template>
 
 <style scoped>
 .page {
-  max-width: 800px;
+  max-width: 980px;
   margin: 2rem auto;
   padding: 0 1rem;
 }
@@ -243,58 +459,90 @@ onMounted(() => {
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
 }
 
 .devices {
-  margin: 2rem 0;
+  margin: 1.25rem 0 2rem;
+}
+
+.devices__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.devices__meta {
+  font-size: 0.875rem;
+  color: #6b7280;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .page__meta {
   color: #6b7280;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1rem;
   font-size: 0.875rem;
-}
-
-.hint {
-  margin-bottom: 0.5rem;
-  font-size: 0.85rem;
-  color: #6b7280;
 }
 
 .btn {
-  padding: 0.625rem 1.25rem;
+  padding: 0.625rem 1.1rem;
   border: none;
-  border-radius: 6px;
+  border-radius: 9999px;
   font-size: 0.875rem;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
-  transition: all 0.2s;
 }
 
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
 .btn--add {
-  background-color: #3b82f6;
-  color: white;
+  background: #3b82f6;
+  color: #fff;
 }
 
-.btn--add:hover:not(:disabled) {
-  background-color: #2563eb;
+.btn--secondary {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.btn-small {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.actions-col {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .success-message {
-  padding: 1rem;
-  background-color: #d1fae5;
+  padding: 0.9rem 1rem;
+  background: #d1fae5;
   border: 1px solid #6ee7b7;
-  border-radius: 6px;
+  border-radius: 10px;
   color: #065f46;
-  margin-bottom: 1.5rem;
-  font-size: 0.875rem;
-  font-weight: 500;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .grid {
@@ -302,18 +550,14 @@ onMounted(() => {
   padding: 0;
   margin: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 1rem;
-}
-
-.grid__item {
-  display: block;
 }
 
 .device-card {
   padding: 1rem;
   border: 1px solid #e5e7eb;
-  border-radius: 6px;
+  border-radius: 12px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -326,16 +570,22 @@ onMounted(() => {
   gap: 0.25rem;
 }
 
+.device-sub {
+  font-size: 0.85rem;
+  color: #374151;
+}
+
 .device-id {
   font-size: 0.8rem;
   color: #6b7280;
 }
 
 .badge {
-  padding: 0.25rem 0.6rem;
+  padding: 0.25rem 0.65rem;
   border-radius: 999px;
   font-size: 0.75rem;
-  font-weight: 600;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .badge--available {
@@ -364,5 +614,60 @@ onMounted(() => {
 
 .state--error {
   color: #b91c1c;
+  white-space: pre-wrap;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 900px;
+}
+
+.table th,
+.table td {
+  padding: 0.85rem 0.75rem;
+  border-bottom: 1px solid #e5e7eb;
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th {
+  font-size: 0.8rem;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.cell-strong {
+  font-weight: 700;
+}
+
+.cell-sub {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-top: 0.15rem;
+}
+
+.pill {
+  display: inline-block;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #111827;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.notes {
+  max-width: 360px;
+  white-space: normal;
+  word-break: break-word;
 }
 </style>
