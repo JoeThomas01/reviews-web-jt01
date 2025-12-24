@@ -16,6 +16,8 @@
   },
   "dependencies": {
     "@auth0/auth0-vue": "^2.5.0",
+    "@microsoft/applicationinsights-dependencies-js": "^3.3.10",
+    "@microsoft/applicationinsights-web": "^3.3.10",
     "vue": "^3.5.22",
     "vue-router": "^4.5.1"
   },
