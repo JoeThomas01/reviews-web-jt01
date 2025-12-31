@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed, watch } from 'vue';
+import { onMounted, ref, computed } from 'vue';
 import { useAuth0 } from '@auth0/auth0-vue';
 import AddReviewForm from '@/components/AddReviewForm.vue';
 import { useReviews, type Reservation } from '@/composables/use-reviews';
@@ -8,16 +8,19 @@ type Device = {
   id: string;
   label?: string;
   deviceType?: string;
-  status?: string;
+  status?: string; // "available" | "reserved" | "loaned" etc
 };
 
-const {
-  isAuthenticated,
-  isLoading,
-  loginWithRedirect,
-  getAccessTokenSilently,
-} = useAuth0();
+type ModelRow = {
+  model: string;
+  total: number;
+  available: number;
+  reserved: number;
+  loaned: number;
+  unknown: number;
+};
 
+const { isAuthenticated, isLoading, loginWithRedirect } = useAuth0();
 const {
   reviews: reservations,
   totalCount,
@@ -33,75 +36,10 @@ const {
 const showForm = ref(false);
 const formRef = ref<InstanceType<typeof AddReviewForm> | null>(null);
 const successMessage = ref<string | null>(null);
+
 const actionBusyId = ref<string | null>(null);
 
 const canCreate = computed(() => isAuthenticated.value && !isLoading.value);
-
-// ---------------------------
-// Staff capability: decode permissions[] from access token
-// ---------------------------
-const staffLoading = ref(false);
-const permissions = ref<string[]>([]);
-const audience = import.meta.env.VITE_AUTH0_AUDIENCE;
-
-function decodeJwtPayload(token: string): any | null {
-  const parts = token.split('.');
-  const base64Url = parts.length >= 2 ? parts[1] : undefined;
-  if (!base64Url) return null;
-
-  // base64url -> base64
-  const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-
-  // Decode safely (handles UTF-8)
-  const json = decodeURIComponent(
-    Array.prototype.map
-      .call(atob(base64), (c: string) => {
-        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-      })
-      .join(''),
-  );
-
-  return JSON.parse(json);
-}
-
-async function refreshPermissions() {
-  permissions.value = [];
-
-  if (!isAuthenticated.value) return;
-
-  staffLoading.value = true;
-  try {
-    // Get a token for the same API audience your app uses
-    const token = await getAccessTokenSilently({
-      authorizationParams: {
-        ...(audience ? { audience } : {}),
-      },
-    });
-
-    const payload = decodeJwtPayload(token);
-    const perms = Array.isArray(payload?.permissions)
-      ? payload.permissions
-      : [];
-    permissions.value = perms;
-  } catch (e) {
-    console.warn('Failed to read permissions from token:', e);
-    permissions.value = [];
-  } finally {
-    staffLoading.value = false;
-  }
-}
-
-const canManageLoans = computed(() =>
-  permissions.value.includes('manage:loans'),
-);
-
-watch(
-  () => isAuthenticated.value,
-  async () => {
-    await refreshPermissions();
-  },
-  { immediate: true },
-);
 
 // ---- Devices ----
 const devices = ref<Device[]>([]);
@@ -144,8 +82,11 @@ function effectiveDeviceStatus(
 ): 'available' | 'reserved' | 'loaned' | 'unknown' {
   const base = normaliseStatus(d.status);
 
+  // If backend says it's loaned, trust that.
   if (base === 'loaned') return 'loaned';
 
+  // If there's an active reservation in Reservations service, use that as a fallback
+  // (useful if device status hasn't updated yet or during eventual consistency).
   const active = reservations.value.find(
     (r) => r.deviceId === d.id && isActiveReservation(r),
   );
@@ -161,6 +102,7 @@ function effectiveDeviceStatus(
   return 'unknown';
 }
 
+// Total device counts (your existing summary)
 const deviceCounts = computed(() => {
   const counts = {
     total: devices.value.length,
@@ -174,6 +116,38 @@ const deviceCounts = computed(() => {
     counts[s] += 1;
   }
   return counts;
+});
+
+// ✅ NEW: Model counts table (group by deviceType)
+const modelRows = computed<ModelRow[]>(() => {
+  const map = new Map<string, ModelRow>();
+
+  for (const d of devices.value) {
+    const model = (d.deviceType ?? 'Unknown model').trim() || 'Unknown model';
+    const status = effectiveDeviceStatus(d);
+
+    let row = map.get(model);
+    if (!row) {
+      row = {
+        model,
+        total: 0,
+        available: 0,
+        reserved: 0,
+        loaned: 0,
+        unknown: 0,
+      };
+      map.set(model, row);
+    }
+
+    row.total += 1;
+    row[status] += 1;
+  }
+
+  // Sort: most available first, then name
+  return Array.from(map.values()).sort((a, b) => {
+    if (b.available !== a.available) return b.available - a.available;
+    return a.model.localeCompare(b.model);
+  });
 });
 
 const fetchDevices = async () => {
@@ -228,7 +202,6 @@ const handleSubmit = async (payload: {
   userId: string;
   notes?: string;
   startDate?: string;
-  endDate?: string;
 }) => {
   if (!canCreate.value) return;
 
@@ -254,8 +227,6 @@ const handleCancel = () => {
 
 async function handleCollect(r: Reservation) {
   if (!r?.id) return;
-  if (!canManageLoans.value) return;
-
   actionBusyId.value = r.id;
   try {
     await collectReservation(r.id);
@@ -267,8 +238,6 @@ async function handleCollect(r: Reservation) {
 
 async function handleReturn(r: Reservation) {
   if (!r?.id) return;
-  if (!canManageLoans.value) return;
-
   actionBusyId.value = r.id;
   try {
     await returnReservation(r.id);
@@ -310,6 +279,54 @@ onMounted(async () => {
       </div>
     </header>
 
+    <!-- ✅ Device Models (Counts) -->
+    <section class="models">
+      <div class="models__header">
+        <h2>Device models</h2>
+        <div class="models__meta" v-if="modelRows.length">
+          <span>{{ modelRows.length }} models</span>
+          <span>• {{ deviceCounts.total }} devices total</span>
+        </div>
+      </div>
+
+      <div v-if="devicesLoading" class="state">Loading models…</div>
+      <div v-else-if="devicesError" class="state state--error">
+        {{ devicesError }}
+      </div>
+      <div v-else-if="!modelRows.length" class="state">
+        No devices found yet (so no models to count).
+      </div>
+
+      <div v-else class="table-wrap">
+        <table class="table models-table">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Total</th>
+              <th>Available</th>
+              <th>Reserved</th>
+              <th>Loaned</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="m in modelRows" :key="m.model">
+              <td class="cell-strong">{{ m.model }}</td>
+              <td>{{ m.total }}</td>
+              <td>{{ m.available }}</td>
+              <td>{{ m.reserved }}</td>
+              <td>{{ m.loaned }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="hint">
+        These counts come from your deployed DeviceLoans data. When a device
+        status changes (reserve / collect / return), the counts update after
+        refresh.
+      </p>
+    </section>
+
     <!-- Devices -->
     <section class="devices">
       <div class="devices__header">
@@ -334,7 +351,7 @@ onMounted(async () => {
         <li v-for="d in devices" :key="d.id" class="grid__item device-card">
           <div class="device-left">
             <strong>{{ d.label ?? d.id }}</strong>
-            <div class="device-sub">{{ d.deviceType ?? 'Unknown type' }}</div>
+            <div class="device-sub">{{ d.deviceType ?? 'Unknown model' }}</div>
             <div class="device-id">ID: {{ d.id }}</div>
           </div>
 
@@ -349,12 +366,6 @@ onMounted(async () => {
     <div v-if="!loading" class="page__meta" aria-live="polite">
       <span v-if="totalCount > 0">{{ totalCount }} total reservations</span>
       <span v-else>No reservations yet</span>
-
-      <span v-if="isAuthenticated" style="margin-left: 10px; color: #6b7280">
-        • Staff actions:
-        <strong v-if="staffLoading">checking…</strong>
-        <strong v-else>{{ canManageLoans ? 'enabled' : 'hidden' }}</strong>
-      </span>
     </div>
 
     <!-- Success -->
@@ -387,10 +398,9 @@ onMounted(async () => {
               <th>Start</th>
               <th>End</th>
               <th>Notes</th>
-              <th v-if="canManageLoans">Actions (staff)</th>
+              <th>Actions (staff)</th>
             </tr>
           </thead>
-
           <tbody>
             <tr v-for="r in reservations" :key="r.id">
               <td>
@@ -406,8 +416,7 @@ onMounted(async () => {
               <td>{{ fmt(r.startDate) }}</td>
               <td>{{ fmt(r.endDate) }}</td>
               <td class="notes">{{ r.notes ?? '-' }}</td>
-
-              <td v-if="canManageLoans">
+              <td>
                 <div class="actions-col">
                   <button
                     class="btn-small"
@@ -466,6 +475,33 @@ onMounted(async () => {
   display: flex;
   gap: 0.75rem;
   align-items: center;
+}
+
+/* ✅ Models section */
+.models {
+  margin: 1.25rem 0 1.5rem;
+}
+
+.models__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.models__meta {
+  font-size: 0.875rem;
+  color: #6b7280;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.hint {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: #6b7280;
 }
 
 .devices {
@@ -628,6 +664,10 @@ onMounted(async () => {
   width: 100%;
   border-collapse: collapse;
   min-width: 900px;
+}
+
+.models-table {
+  min-width: 700px;
 }
 
 .table th,
