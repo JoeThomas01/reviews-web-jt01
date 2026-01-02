@@ -53,8 +53,7 @@ function normaliseStatus(status?: string) {
   const s = (status ?? '').trim().toLowerCase();
   if (s === 'available') return 'available';
   if (s === 'reserved') return 'reserved';
-  if (s === 'loaned' || s === 'loanedout' || s === 'loaned_out')
-    return 'loaned';
+  if (s === 'loaned' || s === 'loanedout' || s === 'loaned_out') return 'loaned';
   return 'unknown';
 }
 
@@ -63,6 +62,13 @@ function availabilityLabel(norm: string) {
   if (norm === 'reserved') return 'Reserved';
   if (norm === 'loaned') return 'Loaned out';
   return 'Unknown';
+}
+
+// ✅ NEW: Strip "CI/CD TEST - " etc from labels at display-time
+function cleanLabel(raw?: string) {
+  const s = (raw ?? '').trim();
+  // Matches: "CI/CD TEST - ", "CI/CD - ", "CICD TEST - " (case-insensitive)
+  return s.replace(/^\s*CI\/?CD\s*(TEST)?\s*-\s*/i, '').trim();
 }
 
 function isActiveReservation(r: Reservation): boolean {
@@ -118,7 +124,7 @@ const deviceCounts = computed(() => {
   return counts;
 });
 
-// ✅ NEW: Model counts table (group by deviceType)
+// ✅ Model counts table (group by deviceType)
 const modelRows = computed<ModelRow[]>(() => {
   const map = new Map<string, ModelRow>();
 
@@ -165,8 +171,7 @@ const fetchDevices = async () => {
       headers: { Accept: 'application/json' },
     });
 
-    if (!res.ok)
-      throw new Error(`DeviceLoans HTTP ${res.status} ${res.statusText}`);
+    if (!res.ok) throw new Error(`DeviceLoans HTTP ${res.status} ${res.statusText}`);
 
     const json = await res.json();
 
@@ -321,9 +326,8 @@ onMounted(async () => {
       </div>
 
       <p class="hint">
-        These counts come from your deployed DeviceLoans data. When a device
-        status changes (reserve / collect / return), the counts update after
-        refresh.
+        These counts come from your deployed DeviceLoans data. When a device status
+        changes (reserve / collect / return), the counts update after refresh.
       </p>
     </section>
 
@@ -350,8 +354,20 @@ onMounted(async () => {
       <ul v-else class="grid" role="list">
         <li v-for="d in devices" :key="d.id" class="grid__item device-card">
           <div class="device-left">
-            <strong>{{ d.label ?? d.id }}</strong>
-            <div class="device-sub">{{ d.deviceType ?? 'Unknown model' }}</div>
+            <!-- ✅ cleaned label -->
+            <strong>{{ cleanLabel(d.label) || d.id }}</strong>
+
+            <!-- ✅ only show deviceType if it isn't the same as the cleaned label -->
+            <div
+              class="device-sub"
+              v-if="
+                (d.deviceType ?? '').trim() &&
+                (d.deviceType ?? '').trim() !== (cleanLabel(d.label) || '').trim()
+              "
+            >
+              {{ d.deviceType }}
+            </div>
+
             <div class="device-id">ID: {{ d.id }}</div>
           </div>
 
@@ -409,9 +425,7 @@ onMounted(async () => {
               </td>
               <td>{{ r.userId }}</td>
               <td>
-                <span class="pill">{{
-                  (r.status ?? 'unknown').toLowerCase()
-                }}</span>
+                <span class="pill">{{ (r.status ?? 'unknown').toLowerCase() }}</span>
               </td>
               <td>{{ fmt(r.startDate) }}</td>
               <td>{{ fmt(r.endDate) }}</td>

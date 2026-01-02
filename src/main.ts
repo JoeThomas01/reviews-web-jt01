@@ -4,7 +4,7 @@ import App from './App.vue';
 import router from './router';
 import { createAuth0 } from '@auth0/auth0-vue';
 
-import { initTelemetry, trackEvent } from './telemetry';
+import { initTelemetry, trackEvent } from '@/telemetry';
 
 const domain = import.meta.env.VITE_AUTH0_DOMAIN;
 const clientId = import.meta.env.VITE_AUTH0_CLIENT_ID;
