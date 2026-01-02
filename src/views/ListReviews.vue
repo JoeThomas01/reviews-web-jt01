@@ -325,10 +325,7 @@ onMounted(async () => {
         </table>
       </div>
 
-      <p class="hint">
-        These counts come from your deployed DeviceLoans data. When a device status
-        changes (reserve / collect / return), the counts update after refresh.
-      </p>
+      
     </section>
 
     <!-- Devices -->
